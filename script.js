@@ -100,52 +100,56 @@ document.addEventListener("DOMContentLoaded", function () {
 
   function updateMainHeader(letter) {
     const mainHeader = document.querySelector("h1");
-    mainHeader.textContent = `Countries that start with "${letter}"`;
+    mainHeader.textContent = `Countries that start with ${letter}`;
   }
-  
+
   function findLetterForCountry(countryId) {
     // Search through all letters in countriesData to find which letter this country belongs to
     for (const letter in countriesData) {
       const countries = countriesData[letter];
-      const foundCountry = countries.find(country => country.id === countryId);
+      const foundCountry = countries.find(
+        (country) => country.id === countryId
+      );
       if (foundCountry) {
         return letter;
       }
     }
     return null; // Country not found
   }
-  
+
   function findCountryByID(countryId) {
     // Search through all letters in countriesData to find the country object
     for (const letter in countriesData) {
       const countries = countriesData[letter];
-      const foundCountry = countries.find(country => country.id === countryId);
+      const foundCountry = countries.find(
+        (country) => country.id === countryId
+      );
       if (foundCountry) {
         return foundCountry;
       }
     }
     return null; // Country not found
   }
-  
+
   function showTooltip(countryId, event) {
     const country = findCountryByID(countryId);
     if (!country) return;
-    
-    const tooltip = document.getElementById('country-tooltip');
+
+    const tooltip = document.getElementById("country-tooltip");
     tooltip.textContent = `${country.flag} ${country.name}`;
-    tooltip.classList.add('visible');
-    
+    tooltip.classList.add("visible");
+
     // Position tooltip near mouse cursor
     const x = event.clientX + 10; // 10px offset to avoid cursor overlap
     const y = event.clientY - 35; // Position above cursor
-    
-    tooltip.style.left = x + 'px';
-    tooltip.style.top = y + 'px';
+
+    tooltip.style.left = x + "px";
+    tooltip.style.top = y + "px";
   }
-  
+
   function hideTooltip() {
-    const tooltip = document.getElementById('country-tooltip');
-    tooltip.classList.remove('visible');
+    const tooltip = document.getElementById("country-tooltip");
+    tooltip.classList.remove("visible");
   }
 
   function updateCountryList(countries, letter) {
@@ -254,7 +258,7 @@ document.addEventListener("DOMContentLoaded", function () {
         if (!this.classList.contains("highlighted")) {
           this.classList.add("hovered");
         }
-        
+
         // Show tooltip with country name
         const countryId = this.id?.toUpperCase();
         if (countryId) {
@@ -268,21 +272,21 @@ document.addEventListener("DOMContentLoaded", function () {
         // Hide tooltip
         hideTooltip();
       });
-      
+
       element.addEventListener("mousemove", function (event) {
         // Update tooltip position as mouse moves
         const countryId = this.id?.toUpperCase();
         if (countryId) {
-          const tooltip = document.getElementById('country-tooltip');
-          if (tooltip.classList.contains('visible')) {
+          const tooltip = document.getElementById("country-tooltip");
+          if (tooltip.classList.contains("visible")) {
             const x = event.clientX + 10;
             const y = event.clientY - 35;
-            tooltip.style.left = x + 'px';
-            tooltip.style.top = y + 'px';
+            tooltip.style.left = x + "px";
+            tooltip.style.top = y + "px";
           }
         }
       });
-      
+
       element.addEventListener("click", function () {
         // Get the country ID from the element
         const countryId = this.id?.toUpperCase();
@@ -303,7 +307,7 @@ document.addEventListener("DOMContentLoaded", function () {
           if (!this.classList.contains("highlighted")) {
             this.classList.add("hovered");
           }
-          
+
           // Show tooltip with country name
           const countryId = this.id?.toUpperCase();
           if (countryId) {
@@ -316,21 +320,21 @@ document.addEventListener("DOMContentLoaded", function () {
           // Hide tooltip
           hideTooltip();
         });
-        
+
         element.addEventListener("mousemove", function (event) {
           // Update tooltip position as mouse moves
           const countryId = this.id?.toUpperCase();
           if (countryId) {
-            const tooltip = document.getElementById('country-tooltip');
-            if (tooltip.classList.contains('visible')) {
+            const tooltip = document.getElementById("country-tooltip");
+            if (tooltip.classList.contains("visible")) {
               const x = event.clientX + 10;
               const y = event.clientY - 35;
-              tooltip.style.left = x + 'px';
-              tooltip.style.top = y + 'px';
+              tooltip.style.left = x + "px";
+              tooltip.style.top = y + "px";
             }
           }
         });
-        
+
         element.addEventListener("click", function () {
           // Get the country ID from the group element
           const countryId = this.id?.toUpperCase();
