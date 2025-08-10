@@ -1,12 +1,22 @@
 document.addEventListener("DOMContentLoaded", function () {
   let currentSelectedLetter = null;
+  let votingSessions = {}; // Store voting data
 
   // Initialize the app
   init();
 
+  // Check if we're on a voting page
+  checkForVotingSession();
+
   function init() {
     createAlphabetKeyboard();
     loadWorldMap();
+    setupVotingButton();
+  }
+
+  function setupVotingButton() {
+    const startVoteBtn = document.getElementById("start-vote-btn");
+    startVoteBtn.addEventListener("click", startVotingSession);
   }
 
   function createAlphabetKeyboard() {
@@ -38,10 +48,12 @@ document.addEventListener("DOMContentLoaded", function () {
       // Reset header and sidebar to default state
       const mainHeader = document.querySelector("h1");
       const countryList = document.getElementById("country-list");
+      const startVoteBtn = document.getElementById("start-vote-btn");
 
       mainHeader.textContent = "Countries that start with...";
       countryList.innerHTML =
         '<p class="placeholder">Click a letter to see countries!</p>';
+      startVoteBtn.disabled = true;
 
       return; // Exit early since we're deselecting
     }
@@ -56,18 +68,27 @@ document.addEventListener("DOMContentLoaded", function () {
 
     currentSelectedLetter = letter;
 
-    // Clear previous highlights
-    clearCountryHighlights();
+    // Update current selected letter
+    currentSelectedLetter = letter;
 
     // Get countries for this letter
     const countries = countriesData[letter] || [];
 
-    // Highlight countries on map
-    highlightCountries(countries);
+    // Enable Start Vote button
+    const startVoteBtn = document.getElementById("start-vote-btn");
+    startVoteBtn.disabled = false;
 
-    // Update main header and country list
+    // Update the main header
     updateMainHeader(letter);
+
+    // Update country list
     updateCountryList(countries, letter);
+
+    // Clear previous highlights
+    clearCountryHighlights();
+
+    // Highlight countries on the map
+    highlightCountries(countries);
   }
 
   function highlightCountries(countries) {
@@ -358,6 +379,332 @@ document.addEventListener("DOMContentLoaded", function () {
         `;
   }
 
-  // Make focusOnCountry available globally for onclick handlers
+  // Voting functions
+  function startVotingSession() {
+    if (!currentSelectedLetter) return;
+
+    const sessionId = generateSessionId();
+    const votingUrl = `${window.location.origin}${window.location.pathname}?vote=${sessionId}&letter=${currentSelectedLetter}`;
+
+    // Store session data
+    const sessionData = {
+      letter: currentSelectedLetter,
+      countries: countriesData[currentSelectedLetter] || [],
+      votes: {},
+      completed: false,
+      createdAt: new Date().toISOString(),
+    };
+
+    // Store in localStorage
+    localStorage.setItem(
+      `voting_session_${sessionId}`,
+      JSON.stringify(sessionData)
+    );
+
+    // Navigate to voting page
+    window.location.href = votingUrl;
+  }
+
+  function generateSessionId() {
+    return (
+      Math.random().toString(36).substring(2, 15) +
+      Math.random().toString(36).substring(2, 15)
+    );
+  }
+
+  function checkForVotingSession() {
+    const urlParams = new URLSearchParams(window.location.search);
+    const sessionId = urlParams.get("vote");
+    const letter = urlParams.get("letter");
+
+    if (sessionId && letter) {
+      loadVotingSession(sessionId, letter);
+    }
+  }
+
+  function loadVotingSession(sessionId, letter) {
+    const sessionData = localStorage.getItem(`voting_session_${sessionId}`);
+
+    if (!sessionData) {
+      alert("Voting session not found!");
+      return;
+    }
+
+    const session = JSON.parse(sessionData);
+
+    if (session.completed) {
+      showVotingResults(session, sessionId);
+    } else {
+      showVotingPage(session, sessionId);
+    }
+  }
+
+  function showVotingPage(session, sessionId) {
+    const container = document.querySelector(".container");
+    container.innerHTML = `
+      <div class="voting-container">
+        <header class="voting-header">
+          <h1>Vote for countries starting with "${session.letter}"</h1>
+        </header>
+        
+		<div class="voting-stats">
+		<div class="leading-country-display" id="leading-country-display">
+			<div class="leading-country-content">
+			<span class="leading-flag" id="leading-flag">🏳️</span>
+			<span class="leading-name" id="leading-name">No votes yet</span>
+			</div>
+		</div>
+		<div class="total-votes" id="total-votes">Total votes: 0</div>
+		</div>
+        <div class="voting-countries" id="voting-countries">
+          <!-- Countries will be populated here -->
+        </div>
+        
+        <div class="voting-actions">
+          <button id="complete-voting-btn" class="complete-voting-btn">Complete Voting</button>
+          <button id="share-vote-btn" class="share-vote-btn">Share Vote Link</button>
+          <button id="back-home-btn" class="back-home-btn" onclick="goBackToHome()">Back to Home</button>
+        </div>
+      </div>
+    `;
+
+    populateVotingCountries(session, sessionId);
+    setupVotingEventListeners(session, sessionId);
+  }
+
+  function populateVotingCountries(session, sessionId) {
+    const container = document.getElementById("voting-countries");
+    const userVotes = JSON.parse(
+      localStorage.getItem(`user_votes_${sessionId}`) || "{}"
+    );
+
+    session.countries.forEach((country) => {
+      const hasVoted = userVotes[country.name];
+      const countryDiv = document.createElement("div");
+      countryDiv.className = "voting-country";
+      countryDiv.innerHTML = `
+        <div class="country-info">
+          <span class="country-flag">${country.flag}</span>
+          <span class="country-name">${country.name}</span>
+        </div>
+        <div class="vote-section">
+          <span class="vote-count">${session.votes[country.name] || 0}</span>
+          <button class="vote-btn ${hasVoted ? "voted" : ""}" data-country="${
+        country.name
+      }">${hasVoted ? "Voted!" : "Vote"}</button>
+        </div>
+      `;
+      container.appendChild(countryDiv);
+    });
+
+    updateVotingStats(session);
+  }
+
+  function setupVotingEventListeners(session, sessionId) {
+    // Vote buttons
+    document.querySelectorAll(".vote-btn").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        const countryName = e.target.dataset.country;
+        castVote(session, sessionId, countryName, e.target);
+      });
+    });
+
+    // Complete voting button
+    document
+      .getElementById("complete-voting-btn")
+      .addEventListener("click", () => {
+        completeVoting(session, sessionId);
+      });
+
+    // Share button
+    document.getElementById("share-vote-btn").addEventListener("click", () => {
+      navigator.clipboard.writeText(window.location.href);
+      alert("Vote link copied to clipboard!");
+    });
+  }
+
+  function castVote(session, sessionId, countryName, buttonElement) {
+    const userId = getUserId();
+    const userVotes = JSON.parse(
+      localStorage.getItem(`user_votes_${sessionId}`) || "{}"
+    );
+
+    // Check if user already voted for this country (toggle functionality)
+    if (userVotes[countryName]) {
+      // Un-vote: remove the vote
+      session.votes[countryName] = Math.max(
+        0,
+        (session.votes[countryName] || 0) - 1
+      );
+      userVotes[countryName] = false;
+
+      // Update UI for un-vote
+      buttonElement.textContent = "Vote";
+      buttonElement.disabled = false;
+      buttonElement.classList.remove("voted");
+    } else {
+      // Vote: add the vote
+      session.votes[countryName] = (session.votes[countryName] || 0) + 1;
+      userVotes[countryName] = true;
+
+      // Update UI for vote
+      buttonElement.textContent = "Voted!";
+      buttonElement.classList.add("voted");
+    }
+
+    // Update storage
+    localStorage.setItem(
+      `voting_session_${sessionId}`,
+      JSON.stringify(session)
+    );
+    localStorage.setItem(`user_votes_${sessionId}`, JSON.stringify(userVotes));
+
+    // Update UI vote count
+    const countryDiv = buttonElement.closest(".voting-country");
+    const voteCount = countryDiv.querySelector(".vote-count");
+    voteCount.textContent = session.votes[countryName] || 0;
+
+    updateVotingStats(session);
+  }
+
+  function updateVotingStats(session) {
+    const totalVotes = Object.values(session.votes).reduce(
+      (sum, count) => sum + count,
+      0
+    );
+    const leadingCountry = Object.entries(session.votes).reduce(
+      (leader, [country, votes]) => {
+        return votes > (leader.votes || 0) ? { country, votes } : leader;
+      },
+      {}
+    );
+
+    // Update total votes
+    document.getElementById(
+      "total-votes"
+    ).textContent = `Total votes: ${totalVotes}`;
+
+    // Update leading country display
+    const leadingFlag = document.getElementById("leading-flag");
+    const leadingName = document.getElementById("leading-name");
+
+    if (leadingCountry.country && leadingCountry.votes > 0) {
+      // Find the country data to get the flag
+      const countryData = session.countries.find(
+        (c) => c.name === leadingCountry.country
+      );
+      leadingFlag.textContent = countryData?.flag || "🏳️";
+      leadingName.textContent = `${leadingCountry.country} (${
+        leadingCountry.votes
+      } vote${leadingCountry.votes !== 1 ? "s" : ""})`;
+    } else {
+      leadingFlag.textContent = "🏳️";
+      leadingName.textContent = "No votes yet";
+    }
+  }
+
+  function getUserId() {
+    let userId = localStorage.getItem("user_id");
+    if (!userId) {
+      userId = generateSessionId();
+      localStorage.setItem("user_id", userId);
+    }
+    return userId;
+  }
+
+  function completeVoting(session, sessionId) {
+    session.completed = true;
+    localStorage.setItem(
+      `voting_session_${sessionId}`,
+      JSON.stringify(session)
+    );
+    showVotingResults(session, sessionId);
+  }
+
+  function showVotingResults(session, sessionId) {
+    const winner = Object.entries(session.votes).reduce(
+      (leader, [country, votes]) => {
+        return votes > (leader.votes || 0) ? { country, votes } : leader;
+      },
+      {}
+    );
+
+    const container = document.querySelector(".container");
+    container.innerHTML = `
+      <div class="results-container">
+        <div class="celebration">
+          <h1 class="celebration-title">🎉 Voting Complete! 🎉</h1>
+          ${
+            winner.country
+              ? `
+            <div class="winner-section">
+              <div class="winner-content">
+                <span class="winner-flag">${session.countries.find(c => c.name === winner.country)?.flag || '🏳️'}</span>
+                <h2 class="winner-name">${winner.country}</h2>
+                <div class="winner-stats">${winner.votes} vote${winner.votes !== 1 ? 's' : ''}</div>
+              </div>
+              <div class="confetti">🎊 🎈 🎉 🎊 🎈</div>
+            </div>
+          `
+              : "<p>No votes were cast!</p>"
+          }
+        </div>
+        
+        <div class="final-results">
+          <h3>Final Results:</h3>
+          <div class="results-list" id="results-list">
+            <!-- Results will be populated here -->
+          </div>
+        </div>
+        
+        <div class="results-actions">
+          <button onclick="goBackToHome()" class="back-btn">Back to Home</button>
+        </div>
+      </div>
+    `;
+
+    populateResults(session);
+    triggerCelebration();
+  }
+
+  function populateResults(session) {
+    const resultsList = document.getElementById("results-list");
+    const sortedResults = Object.entries(session.votes)
+      .sort(([, a], [, b]) => b - a)
+      .map(([country, votes]) => {
+        const countryData = session.countries.find((c) => c.name === country);
+        return { country, votes, flag: countryData?.flag || "🏳️" };
+      });
+
+    sortedResults.forEach((result, index) => {
+      const resultDiv = document.createElement("div");
+      resultDiv.className = `result-item ${index === 0 ? "winner" : ""}`;
+      resultDiv.innerHTML = `
+        <span class="result-rank">#${index + 1}</span>
+        <span class="result-flag">${result.flag}</span>
+        <span class="result-country">${result.country}</span>
+        <span class="result-votes">${result.votes} vote${
+        result.votes !== 1 ? "s" : ""
+      }</span>
+      `;
+      resultsList.appendChild(resultDiv);
+    });
+  }
+
+  function triggerCelebration() {
+    // Add some celebration animations
+    setTimeout(() => {
+      document.querySelector(".celebration-title").style.animation =
+        "bounce 1s ease-in-out";
+    }, 500);
+  }
+  
+  function goBackToHome() {
+    // Clear URL parameters and reload to main page
+    window.location.href = window.location.pathname;
+  }
+
+  // Make functions available globally
   window.focusOnCountry = focusOnCountry;
+  window.goBackToHome = goBackToHome;
 });
