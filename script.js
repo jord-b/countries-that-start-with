@@ -1,6 +1,8 @@
 document.addEventListener("DOMContentLoaded", function () {
   let currentSelectedLetter = null;
-  let votingSessions = {}; // Store voting data
+  let currentSessionId = null;
+  let supabase = window.supabaseClient;
+  let realTimeSubscription = null;
 
   // Initialize the app
   init();
@@ -380,29 +382,40 @@ document.addEventListener("DOMContentLoaded", function () {
   }
 
   // Voting functions
-  function startVotingSession() {
+  async function startVotingSession() {
     if (!currentSelectedLetter) return;
 
     const sessionId = generateSessionId();
-    const votingUrl = `${window.location.origin}${window.location.pathname}?vote=${sessionId}&letter=${currentSelectedLetter}`;
-
-    // Store session data
+    
+    // Create session data
     const sessionData = {
+      session_id: sessionId,
       letter: currentSelectedLetter,
       countries: countriesData[currentSelectedLetter] || [],
-      votes: {},
-      completed: false,
-      createdAt: new Date().toISOString(),
+      completed: false
     };
 
-    // Store in localStorage
-    localStorage.setItem(
-      `voting_session_${sessionId}`,
-      JSON.stringify(sessionData)
-    );
+    try {
+      // Insert session into Supabase
+      const { data, error } = await supabase
+        .from('voting_sessions')
+        .insert([sessionData])
+        .select();
 
-    // Navigate to voting page
-    window.location.href = votingUrl;
+      if (error) {
+        console.error('Error creating voting session:', error);
+        alert('Failed to create voting session. Please try again.');
+        return;
+      }
+
+      // Navigate to voting page with session ID
+      const votingUrl = `${window.location.origin}${window.location.pathname}?vote=${sessionId}&letter=${currentSelectedLetter}`;
+      window.location.href = votingUrl;
+      
+    } catch (error) {
+      console.error('Error starting voting session:', error);
+      alert('Failed to create voting session. Please check your internet connection.');
+    }
   }
 
   function generateSessionId() {
@@ -418,24 +431,173 @@ document.addEventListener("DOMContentLoaded", function () {
     const letter = urlParams.get("letter");
 
     if (sessionId && letter) {
+      currentSessionId = sessionId;
       loadVotingSession(sessionId, letter);
     }
   }
 
-  function loadVotingSession(sessionId, letter) {
-    const sessionData = localStorage.getItem(`voting_session_${sessionId}`);
+  async function loadVotingSession(sessionId, letter) {
+    try {
+      // Fetch session from Supabase
+      const { data: sessionData, error: sessionError } = await supabase
+        .from('voting_sessions')
+        .select('*')
+        .eq('session_id', sessionId)
+        .single();
 
-    if (!sessionData) {
-      alert("Voting session not found!");
+      if (sessionError) {
+        console.error('Error loading session:', sessionError);
+        // Create new session if not found
+        await createNewSession(sessionId, letter);
+        return;
+      }
+
+      // Fetch current votes for this session
+      const { data: votesData, error: votesError } = await supabase
+        .from('votes')
+        .select('*')
+        .eq('session_id', sessionId);
+
+      if (votesError) {
+        console.error('Error loading votes:', votesError);
+      }
+
+      // Process votes into format expected by UI
+      const votes = {};
+      if (votesData) {
+        votesData.forEach(vote => {
+          votes[vote.country_name] = (votes[vote.country_name] || 0) + 1;
+        });
+      }
+
+      // Create session object with vote counts
+      const session = {
+        ...sessionData,
+        votes: votes
+      };
+
+      // Set up real-time subscription for this session
+      setupRealTimeSubscription(sessionId);
+
+      if (session.completed) {
+        showVotingResults(session, sessionId);
+      } else {
+        showVotingPage(session, sessionId);
+      }
+      
+    } catch (error) {
+      console.error('Error loading voting session:', error);
+      alert('Failed to load voting session. Please check your internet connection.');
+    }
+  }
+
+  async function createNewSession(sessionId, letter) {
+    const sessionData = {
+      session_id: sessionId,
+      letter: letter,
+      countries: countriesData[letter] || [],
+      completed: false
+    };
+
+    const { error } = await supabase
+      .from('voting_sessions')
+      .insert([sessionData]);
+
+    if (error) {
+      console.error('Error creating new session:', error);
+      alert('Failed to create voting session.');
       return;
     }
 
-    const session = JSON.parse(sessionData);
+    const session = {
+      ...sessionData,
+      votes: {}
+    };
 
-    if (session.completed) {
-      showVotingResults(session, sessionId);
-    } else {
-      showVotingPage(session, sessionId);
+    setupRealTimeSubscription(sessionId);
+    showVotingPage(session, sessionId);
+  }
+  
+  function setupRealTimeSubscription(sessionId) {
+    // Clean up existing subscription
+    if (realTimeSubscription) {
+      supabase.removeChannel(realTimeSubscription);
+    }
+    
+    // Subscribe to vote changes for this session
+    realTimeSubscription = supabase
+      .channel(`voting_session_${sessionId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'votes',
+          filter: `session_id=eq.${sessionId}`
+        },
+        (payload) => {
+          console.log('Real-time vote update:', payload);
+          // Refresh vote counts when votes change
+          refreshVoteCounts(sessionId);
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'voting_sessions',
+          filter: `session_id=eq.${sessionId}`
+        },
+        (payload) => {
+          console.log('Session updated:', payload);
+          // Handle session completion
+          if (payload.new.completed && !payload.old.completed) {
+            // Session was just completed, refresh the page to show results
+            setTimeout(() => {
+              location.reload();
+            }, 1000);
+          }
+        }
+      )
+      .subscribe();
+  }
+  
+  async function refreshVoteCounts(sessionId) {
+    try {
+      // Fetch updated votes
+      const { data: votesData, error } = await supabase
+        .from('votes')
+        .select('*')
+        .eq('session_id', sessionId);
+        
+      if (error) {
+        console.error('Error refreshing votes:', error);
+        return;
+      }
+      
+      // Process votes into counts
+      const votes = {};
+      if (votesData) {
+        votesData.forEach(vote => {
+          votes[vote.country_name] = (votes[vote.country_name] || 0) + 1;
+        });
+      }
+      
+      // Update all vote count displays
+      Object.keys(votes).forEach(countryName => {
+        const voteCountElement = document.querySelector(`[data-country="${countryName}"]`)?.closest('.voting-country')?.querySelector('.vote-count');
+        if (voteCountElement) {
+          voteCountElement.textContent = votes[countryName] || 0;
+        }
+      });
+      
+      // Update voting stats
+      const session = { votes, countries: countriesData[currentSelectedLetter] || [] };
+      updateVotingStats(session);
+      
+    } catch (error) {
+      console.error('Error refreshing vote counts:', error);
     }
   }
 
@@ -472,11 +634,29 @@ document.addEventListener("DOMContentLoaded", function () {
     setupVotingEventListeners(session, sessionId);
   }
 
-  function populateVotingCountries(session, sessionId) {
+  async function populateVotingCountries(session, sessionId) {
     const container = document.getElementById("voting-countries");
-    const userVotes = JSON.parse(
-      localStorage.getItem(`user_votes_${sessionId}`) || "{}"
-    );
+    const userId = getUserId();
+    
+    // Fetch user's existing votes for this session
+    let userVotes = {};
+    try {
+      const { data: votesData, error } = await supabase
+        .from('votes')
+        .select('country_name')
+        .eq('session_id', sessionId)
+        .eq('user_id', userId);
+        
+      if (error) {
+        console.error('Error fetching user votes:', error);
+      } else if (votesData) {
+        votesData.forEach(vote => {
+          userVotes[vote.country_name] = true;
+        });
+      }
+    } catch (error) {
+      console.error('Error loading user votes:', error);
+    }
 
     session.countries.forEach((country) => {
       const hasVoted = userVotes[country.name];
@@ -523,48 +703,69 @@ document.addEventListener("DOMContentLoaded", function () {
     });
   }
 
-  function castVote(session, sessionId, countryName, buttonElement) {
+  async function castVote(session, sessionId, countryName, buttonElement) {
     const userId = getUserId();
-    const userVotes = JSON.parse(
-      localStorage.getItem(`user_votes_${sessionId}`) || "{}"
-    );
+    
+    try {
+      // Check if user already voted for this country
+      const { data: existingVote, error: checkError } = await supabase
+        .from('votes')
+        .select('*')
+        .eq('session_id', sessionId)
+        .eq('country_name', countryName)
+        .eq('user_id', userId)
+        .single();
 
-    // Check if user already voted for this country (toggle functionality)
-    if (userVotes[countryName]) {
-      // Un-vote: remove the vote
-      session.votes[countryName] = Math.max(
-        0,
-        (session.votes[countryName] || 0) - 1
-      );
-      userVotes[countryName] = false;
+      if (checkError && checkError.code !== 'PGRST116') { // PGRST116 is "not found" error
+        console.error('Error checking existing vote:', checkError);
+        return;
+      }
 
-      // Update UI for un-vote
-      buttonElement.textContent = "Vote";
-      buttonElement.disabled = false;
-      buttonElement.classList.remove("voted");
-    } else {
-      // Vote: add the vote
-      session.votes[countryName] = (session.votes[countryName] || 0) + 1;
-      userVotes[countryName] = true;
+      if (existingVote) {
+        // Un-vote: remove the vote from database
+        const { error: deleteError } = await supabase
+          .from('votes')
+          .delete()
+          .eq('id', existingVote.id);
 
-      // Update UI for vote
-      buttonElement.textContent = "Voted!";
-      buttonElement.classList.add("voted");
+        if (deleteError) {
+          console.error('Error removing vote:', deleteError);
+          alert('Failed to remove vote. Please try again.');
+          return;
+        }
+
+        // Update UI for un-vote
+        buttonElement.textContent = "Vote";
+        buttonElement.classList.remove("voted");
+      } else {
+        // Vote: add the vote to database
+        const { error: insertError } = await supabase
+          .from('votes')
+          .insert({
+            session_id: sessionId,
+            country_name: countryName,
+            user_id: userId
+          });
+
+        if (insertError) {
+          console.error('Error adding vote:', insertError);
+          alert('Failed to add vote. Please try again.');
+          return;
+        }
+
+        // Update UI for vote
+        buttonElement.textContent = "Voted!";
+        buttonElement.classList.add("voted");
+      }
+
+      // The real-time subscription will automatically update the vote counts
+      // But we can also immediately refresh to show the change
+      setTimeout(() => refreshVoteCounts(sessionId), 100);
+      
+    } catch (error) {
+      console.error('Error casting vote:', error);
+      alert('Failed to cast vote. Please check your internet connection.');
     }
-
-    // Update storage
-    localStorage.setItem(
-      `voting_session_${sessionId}`,
-      JSON.stringify(session)
-    );
-    localStorage.setItem(`user_votes_${sessionId}`, JSON.stringify(userVotes));
-
-    // Update UI vote count
-    const countryDiv = buttonElement.closest(".voting-country");
-    const voteCount = countryDiv.querySelector(".vote-count");
-    voteCount.textContent = session.votes[countryName] || 0;
-
-    updateVotingStats(session);
   }
 
   function updateVotingStats(session) {
@@ -612,13 +813,28 @@ document.addEventListener("DOMContentLoaded", function () {
     return userId;
   }
 
-  function completeVoting(session, sessionId) {
-    session.completed = true;
-    localStorage.setItem(
-      `voting_session_${sessionId}`,
-      JSON.stringify(session)
-    );
-    showVotingResults(session, sessionId);
+  async function completeVoting(session, sessionId) {
+    try {
+      // Update session as completed in Supabase
+      const { error } = await supabase
+        .from('voting_sessions')
+        .update({ completed: true })
+        .eq('session_id', sessionId);
+
+      if (error) {
+        console.error('Error completing voting session:', error);
+        alert('Failed to complete voting. Please try again.');
+        return;
+      }
+
+      // Update local session object
+      session.completed = true;
+      showVotingResults(session, sessionId);
+      
+    } catch (error) {
+      console.error('Error completing voting session:', error);
+      alert('Failed to complete voting. Please check your internet connection.');
+    }
   }
 
   function showVotingResults(session, sessionId) {
