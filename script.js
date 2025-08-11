@@ -3,6 +3,8 @@ document.addEventListener("DOMContentLoaded", function () {
   let currentSessionId = null;
   let supabase = window.supabaseClient;
   let realTimeSubscription = null;
+  let pollingInterval = null;
+  let lastVoteHash = null; // To detect changes
 
   // Initialize the app
   init();
@@ -482,7 +484,7 @@ document.addEventListener("DOMContentLoaded", function () {
       if (session.completed) {
         showVotingResults(session, sessionId);
       } else {
-        showVotingPage(session, sessionId);
+        await showVotingPage(session, sessionId);
       }
       
     } catch (error) {
@@ -515,55 +517,148 @@ document.addEventListener("DOMContentLoaded", function () {
     };
 
     setupRealTimeSubscription(sessionId);
-    showVotingPage(session, sessionId);
+    await showVotingPage(session, sessionId);
   }
   
   function setupRealTimeSubscription(sessionId) {
-    // Clean up existing subscription
-    if (realTimeSubscription) {
-      supabase.removeChannel(realTimeSubscription);
+    console.log('🔄 Setting up polling-based vote synchronization for session:', sessionId);
+    
+    // Clean up existing polling
+    if (pollingInterval) {
+      console.log('🧹 Cleaning up existing polling interval');
+      clearInterval(pollingInterval);
     }
     
-    // Subscribe to vote changes for this session
-    realTimeSubscription = supabase
-      .channel(`voting_session_${sessionId}`)
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'votes',
-          filter: `session_id=eq.${sessionId}`
-        },
-        (payload) => {
-          console.log('Real-time vote update:', payload);
-          // Refresh vote counts when votes change
-          refreshVoteCounts(sessionId);
+    // Start polling for vote updates
+    startVotePolling(sessionId);
+  }
+  
+  function startVotePolling(sessionId) {
+    let pollCount = 0;
+    let consecutiveNoChanges = 0;
+    const maxConsecutiveNoChanges = 10; // Reduce frequency after 10 polls with no changes
+    
+    // Initial poll
+    pollForVoteUpdates(sessionId);
+    
+    // Set up smart polling with adaptive frequency
+    pollingInterval = setInterval(async () => {
+      pollCount++;
+      console.log(`🔍 Polling for vote updates (poll #${pollCount})`);
+      
+      const hasChanges = await pollForVoteUpdates(sessionId);
+      
+      if (hasChanges) {
+        consecutiveNoChanges = 0;
+        console.log('📈 Vote changes detected, maintaining frequent polling');
+      } else {
+        consecutiveNoChanges++;
+        console.log(`📉 No changes detected (${consecutiveNoChanges}/${maxConsecutiveNoChanges})`);
+        
+        // If no changes for a while, reduce polling frequency
+        if (consecutiveNoChanges >= maxConsecutiveNoChanges) {
+          console.log('⏸️ Reducing polling frequency due to inactivity');
+          clearInterval(pollingInterval);
+          
+          // Switch to slower polling (every 10 seconds instead of 2)
+          pollingInterval = setInterval(async () => {
+            const slowPollChanges = await pollForVoteUpdates(sessionId);
+            if (slowPollChanges) {
+              console.log('🚀 Activity detected, switching back to fast polling');
+              clearInterval(pollingInterval);
+              startVotePolling(sessionId); // Restart fast polling
+            }
+          }, 10000);
         }
-      )
-      .on(
-        'postgres_changes',
-        {
-          event: 'UPDATE',
-          schema: 'public',
-          table: 'voting_sessions',
-          filter: `session_id=eq.${sessionId}`
-        },
-        (payload) => {
-          console.log('Session updated:', payload);
-          // Handle session completion
-          if (payload.new.completed && !payload.old.completed) {
-            // Session was just completed, refresh the page to show results
-            setTimeout(() => {
-              location.reload();
-            }, 1000);
-          }
-        }
-      )
-      .subscribe();
+      }
+    }, 2000); // Poll every 2 seconds initially
+    
+    console.log('✅ Started polling for vote updates');
+  }
+  
+  async function pollForVoteUpdates(sessionId) {
+    try {
+      // Check session completion status first
+      const { data: sessionData, error: sessionError } = await supabase
+        .from('voting_sessions')
+        .select('completed')
+        .eq('session_id', sessionId)
+        .single();
+        
+      if (!sessionError && sessionData?.completed) {
+        console.log('🎉 Session completed, reloading page');
+        setTimeout(() => {
+          location.reload();
+        }, 1000);
+        return false;
+      }
+      
+      // Fetch current votes with MORE detailed debugging
+      console.log('🔍 Fetching votes for session:', sessionId);
+      const { data: votesData, error } = await supabase
+        .from('votes')
+        .select('country_name, user_id, created_at')
+        .eq('session_id', sessionId)
+        .order('created_at', { ascending: true });
+        
+      if (error) {
+        console.error('❌ Error polling votes:', error);
+        return false;
+      }
+      
+      console.log('📊 Raw vote data fetched:', votesData);
+      console.log('📊 Vote count:', votesData?.length || 0);
+      
+      // Create a hash of the current vote state to detect changes
+      const voteStateString = JSON.stringify(votesData || []);
+      // Use a better hash - combination of vote count + simplified content hash
+      const voteCount = votesData?.length || 0;
+      const contentHash = btoa(voteStateString).slice(-10); // Take LAST 10 chars (more likely to change)
+      const currentHash = `${voteCount}-${contentHash}`; // e.g. "12-abc123def"
+      
+      console.log('🔢 Current vote data string:', voteStateString);
+      console.log('🔢 Current hash:', currentHash);
+      console.log('🔢 Previous hash:', lastVoteHash);
+      
+      if (lastVoteHash === null) {
+        // First poll, just store the hash
+        lastVoteHash = currentHash;
+        console.log('📝 Stored initial vote hash:', currentHash);
+        // Actually let's refresh on first poll too to show current votes
+        await refreshVoteCounts(sessionId);
+        return false;
+      }
+      
+      if (currentHash !== lastVoteHash) {
+        console.log('🔄 Vote changes detected! Hash changed from', lastVoteHash, 'to', currentHash);
+        lastVoteHash = currentHash;
+        
+        // Refresh the UI with new vote data
+        await refreshVoteCounts(sessionId);
+        return true;
+      } else {
+        console.log('📉 No changes detected - hashes match');
+      }
+      
+      return false;
+      
+    } catch (error) {
+      console.error('❌ Error during polling:', error);
+      return false;
+    }
+  }
+  
+  function stopVotePolling() {
+    if (pollingInterval) {
+      console.log('🛑 Stopping vote polling');
+      clearInterval(pollingInterval);
+      pollingInterval = null;
+    }
   }
   
   async function refreshVoteCounts(sessionId) {
+    console.log('🔄 Starting vote count refresh for session:', sessionId);
+    
     try {
       // Fetch updated votes
       const { data: votesData, error } = await supabase
@@ -572,36 +667,75 @@ document.addEventListener("DOMContentLoaded", function () {
         .eq('session_id', sessionId);
         
       if (error) {
-        console.error('Error refreshing votes:', error);
+        console.error('❌ Error refreshing votes:', error);
         return;
       }
       
+      console.log('📊 Received vote data:', votesData);
+      
       // Process votes into counts
       const votes = {};
+      const userVotes = {}; // Track which countries the current user voted for
+      const currentUserId = getUserId();
+      
       if (votesData) {
         votesData.forEach(vote => {
           votes[vote.country_name] = (votes[vote.country_name] || 0) + 1;
+          
+          // Track current user's votes
+          if (vote.user_id === currentUserId) {
+            userVotes[vote.country_name] = true;
+          }
         });
       }
       
-      // Update all vote count displays
-      Object.keys(votes).forEach(countryName => {
-        const voteCountElement = document.querySelector(`[data-country="${countryName}"]`)?.closest('.voting-country')?.querySelector('.vote-count');
-        if (voteCountElement) {
-          voteCountElement.textContent = votes[countryName] || 0;
+      console.log('📈 Processed vote counts:', votes);
+      console.log('👤 Current user votes:', userVotes);
+      
+      // Update all vote count displays AND button states
+      const votingCountries = document.querySelectorAll('.voting-country');
+      votingCountries.forEach(countryDiv => {
+        const button = countryDiv.querySelector('.vote-btn');
+        const voteCountElement = countryDiv.querySelector('.vote-count');
+        
+        if (button && voteCountElement) {
+          const countryName = button.dataset.country;
+          const newCount = votes[countryName] || 0;
+          const userHasVoted = userVotes[countryName] || false;
+          
+          // Update vote count
+          voteCountElement.textContent = newCount;
+          
+          // Update button state based on database state
+          if (userHasVoted) {
+            button.textContent = 'Voted!';
+            button.classList.add('voted');
+          } else {
+            button.textContent = 'Vote';
+            button.classList.remove('voted');
+          }
+          
+          console.log(`🏳️ Updated ${countryName}: ${newCount} votes, user voted: ${userHasVoted}`);
         }
       });
       
-      // Update voting stats
-      const session = { votes, countries: countriesData[currentSelectedLetter] || [] };
+      // Update voting stats with fresh data
+      // Get the correct letter from URL params if currentSelectedLetter is not set
+      const urlParams = new URLSearchParams(window.location.search);
+      const letter = currentSelectedLetter || urlParams.get('letter') || 'A';
+      const session = { votes, countries: countriesData[letter] || [] };
+      
+      console.log('📊 Using letter for stats:', letter, 'Countries available:', session.countries.length);
       updateVotingStats(session);
       
+      console.log('✅ Vote count refresh completed successfully');
+      
     } catch (error) {
-      console.error('Error refreshing vote counts:', error);
+      console.error('❌ Error refreshing vote counts:', error);
     }
   }
 
-  function showVotingPage(session, sessionId) {
+  async function showVotingPage(session, sessionId) {
     const container = document.querySelector(".container");
     container.innerHTML = `
       <div class="voting-container">
@@ -630,7 +764,8 @@ document.addEventListener("DOMContentLoaded", function () {
       </div>
     `;
 
-    populateVotingCountries(session, sessionId);
+    // Wait for countries to be populated before setting up event listeners
+    await populateVotingCountries(session, sessionId);
     setupVotingEventListeners(session, sessionId);
   }
 
@@ -705,7 +840,36 @@ document.addEventListener("DOMContentLoaded", function () {
 
   async function castVote(session, sessionId, countryName, buttonElement) {
     const userId = getUserId();
+    const countryDiv = buttonElement.closest(".voting-country");
+    const voteCount = countryDiv.querySelector(".vote-count");
     
+    // Get current state
+    const isCurrentlyVoted = buttonElement.classList.contains("voted");
+    const currentCount = parseInt(voteCount.textContent) || 0;
+    
+    // OPTIMISTIC UPDATE: Update UI immediately for snappy feel
+    if (isCurrentlyVoted) {
+      // Un-vote: Update UI immediately
+      buttonElement.textContent = "Vote";
+      buttonElement.classList.remove("voted");
+      voteCount.textContent = Math.max(0, currentCount - 1);
+      
+      // Update local session object for stats
+      session.votes[countryName] = Math.max(0, (session.votes[countryName] || 0) - 1);
+    } else {
+      // Vote: Update UI immediately
+      buttonElement.textContent = "Voted!";
+      buttonElement.classList.add("voted");
+      voteCount.textContent = currentCount + 1;
+      
+      // Update local session object for stats
+      session.votes[countryName] = (session.votes[countryName] || 0) + 1;
+    }
+    
+    // Update voting stats immediately
+    updateVotingStats(session);
+    
+    // BACKGROUND DATABASE SYNC: Handle database operations without blocking UI
     try {
       // Check if user already voted for this country
       const { data: existingVote, error: checkError } = await supabase
@@ -718,11 +882,25 @@ document.addEventListener("DOMContentLoaded", function () {
 
       if (checkError && checkError.code !== 'PGRST116') { // PGRST116 is "not found" error
         console.error('Error checking existing vote:', checkError);
+        // Revert optimistic update on error
+        revertOptimisticUpdate(buttonElement, voteCount, countryName, session, isCurrentlyVoted, currentCount);
         return;
       }
 
-      if (existingVote) {
-        // Un-vote: remove the vote from database
+      if (existingVote && !isCurrentlyVoted) {
+        // Database shows vote exists but UI was in un-voted state - sync conflict
+        console.log('Sync conflict: vote exists in database, syncing UI');
+        return; // Real-time subscription will handle the correction
+      }
+      
+      if (!existingVote && isCurrentlyVoted) {
+        // Database shows no vote but UI was in voted state - sync conflict
+        console.log('Sync conflict: vote missing in database, syncing UI');
+        return; // Real-time subscription will handle the correction
+      }
+
+      if (isCurrentlyVoted) {
+        // Remove vote from database
         const { error: deleteError } = await supabase
           .from('votes')
           .delete()
@@ -730,15 +908,13 @@ document.addEventListener("DOMContentLoaded", function () {
 
         if (deleteError) {
           console.error('Error removing vote:', deleteError);
+          // Revert optimistic update on database error
+          revertOptimisticUpdate(buttonElement, voteCount, countryName, session, isCurrentlyVoted, currentCount);
           alert('Failed to remove vote. Please try again.');
           return;
         }
-
-        // Update UI for un-vote
-        buttonElement.textContent = "Vote";
-        buttonElement.classList.remove("voted");
       } else {
-        // Vote: add the vote to database
+        // Add vote to database
         const { error: insertError } = await supabase
           .from('votes')
           .insert({
@@ -749,23 +925,34 @@ document.addEventListener("DOMContentLoaded", function () {
 
         if (insertError) {
           console.error('Error adding vote:', insertError);
+          // Revert optimistic update on database error
+          revertOptimisticUpdate(buttonElement, voteCount, countryName, session, isCurrentlyVoted, currentCount);
           alert('Failed to add vote. Please try again.');
           return;
         }
-
-        // Update UI for vote
-        buttonElement.textContent = "Voted!";
-        buttonElement.classList.add("voted");
       }
-
-      // The real-time subscription will automatically update the vote counts
-      // But we can also immediately refresh to show the change
-      setTimeout(() => refreshVoteCounts(sessionId), 100);
       
     } catch (error) {
-      console.error('Error casting vote:', error);
-      alert('Failed to cast vote. Please check your internet connection.');
+      console.error('Error syncing vote with database:', error);
+      // Revert optimistic update on network error
+      revertOptimisticUpdate(buttonElement, voteCount, countryName, session, isCurrentlyVoted, currentCount);
+      alert('Failed to sync vote. Please check your internet connection.');
     }
+  }
+  
+  function revertOptimisticUpdate(buttonElement, voteCount, countryName, session, wasVoted, originalCount) {
+    // Revert UI to original state
+    if (wasVoted) {
+      buttonElement.textContent = "Voted!";
+      buttonElement.classList.add("voted");
+    } else {
+      buttonElement.textContent = "Vote";
+      buttonElement.classList.remove("voted");
+    }
+    
+    voteCount.textContent = originalCount;
+    session.votes[countryName] = originalCount;
+    updateVotingStats(session);
   }
 
   function updateVotingStats(session) {
@@ -916,9 +1103,21 @@ document.addEventListener("DOMContentLoaded", function () {
   }
   
   function goBackToHome() {
+    // Stop polling when leaving voting session
+    stopVotePolling();
     // Clear URL parameters and reload to main page
     window.location.href = window.location.pathname;
   }
+  
+  // Cleanup polling when page is closed or refreshed
+  window.addEventListener('beforeunload', () => {
+    stopVotePolling();
+  });
+  
+  // Cleanup polling when navigating away
+  window.addEventListener('pagehide', () => {
+    stopVotePolling();
+  });
 
   // Make functions available globally
   window.focusOnCountry = focusOnCountry;
